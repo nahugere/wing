@@ -4,11 +4,9 @@ import json
 import logging
 import os
 import struct
-
 import requests
 import websockets
 import threading
-import sqlite3
 import urllib3
 
 class Wing:
@@ -27,15 +25,15 @@ class Wing:
 
     def __init__(self):
         self._setup_logger()
-        with sqlite3.connect(self.DB_NAME) as conn:
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS projects (
-                    project_name TEXT,
-                    project_id TEXT
-                )
-            """)
+
+    def _reg_session(self):
+        response = requests.post(f"{self.URI}/api/create")
+        data = response.json()
+
+        if data.get("statusCode") != 200:
+            return
+
+        return data.get("data")["project_id"], data.get("data")["secret"]
 
     def _setup_logger(self):
         os.makedirs("logs", exist_ok=True)
@@ -52,21 +50,6 @@ class Wing:
         ))
 
         self.logger.addHandler(handler)
-
-    def list_projects(self):
-        with sqlite3.connect(self.DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM projects")
-            rows = cursor.fetchall()
-            print(f"\n\t{'Project Name':<15} {'Project ID':<30}")
-            for row in rows:
-                print(f"\t{row[0]:<15} {self.YELLOW}{row[1]:<30}{self.RESET}")
-
-    def _save_to_sql(self, ws, project_name, project_id):
-        with sqlite3.connect(self.DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO projects VALUES (?, ?)", (project_name, project_id))
-        return
 
     def log(self, message):
         now = datetime.now()
@@ -129,18 +112,25 @@ class Wing:
                     )
 
     async def start(self, project_id, port, preset=None, *args, **kwargs):
+        project_id, secret = self._reg_session()
+        if not(project_id and secret):
+            print(f"{self.RED}Session registration failed{self.RESET}")
+            return
+
+        headers = {"Authorization": f"Bearer {secret}"}
+
         if preset:
             try:
                 asyncio.create_task(self.vmService(project_id, preset, port))
                 print(f"Forwarding Dart VM services")
 
-            except:
+            except Exception as e:
                 self.logger.exception("Forwarding failed")
                 self.log(
                     f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
                 )
 
-        async with websockets.connect(f"{self.WS_URI}/{project_id}") as ws:
+        async with websockets.connect(f"{self.WS_URI}/{project_id}", additional_headers=headers) as ws:
             print("Connection to server established")
             print(f"Forwarding port {self.YELLOW}{port}{self.RESET}")
 
@@ -223,3 +213,6 @@ class Wing:
     def help(self):
         # TODO: Add random dad joke generator
         print("WINGGGGGGGGGGGG\n\n")
+
+    def version(self):
+        print("Still a beta")
