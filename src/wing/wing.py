@@ -101,7 +101,7 @@ class Wing:
                 f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
             )
 
-    async def vmService(self, project_id, preset, port):
+    async def vmService(self, project_id, preset):
         local_connections = {}
 
         try:
@@ -109,8 +109,7 @@ class Wing:
                 while True:
                     m = await ws.recv()
                     message = json.loads(m)
-                    if preset.name != "FLUTTER":
-                        port = message['port']
+                    port = message['port']
 
                     if port not in local_connections:
                         local_ws = await websockets.connect(f"ws://localhost:{port}/{'/'.join(message['params'])}")
@@ -129,7 +128,51 @@ class Wing:
                 f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
             )
 
-    async def start(self, port, preset=None, *args, **kwargs):
+    async def streamReqs(self, port, message, ws):
+        method = message["method"]
+        location = message["path"]
+        mid = message["messageId"]
+
+        headers = dict(message["headers"])
+
+        headers["x-forwarded-for"] = message.get("ip", "")
+        headers["x-forwarded-host"] = message["headers"].get("host", "")
+        headers["x-forwarded-proto"] = "http"
+        headers["x-forwarded-by"] = "wing-tunnel"
+
+        body = message["body"]
+        if isinstance(body, dict) and body.get("type") == "Buffer":
+            body = bytes(body["data"])
+
+        self.log(f"Received: [{method}] {self.YELLOW}http://127.0.0.1:{port}{location}{self.RESET}")
+        async with self.http_client.stream(
+            method,
+            f"http://localhost:{port}{location}",
+            params=message.get("query", None),
+            headers=headers,
+            cookies=message.get("cookies", None),
+            data=body,
+        ) as response:
+
+                try:
+                    response.headers["Transfer-Encoding"] = "chunked"
+                    del response.headers["Content-Length"]
+                except:
+                    pass
+
+                response_headers = list(response.headers.multi_items())
+
+                await self.send_binary(
+                    ws, mid, response.status_code, response_headers, b"", False)
+
+                async for chunk in response.aiter_bytes():
+                    await self.send_binary(
+                        ws, mid, response.status_code, response_headers, chunk, False)
+
+                await self.send_binary(
+                    ws, mid, response.status_code, response_headers, b"", True)
+
+    async def start(self, port, wsForwarding=True, *args, **kwargs):
         project_id, secret = self._reg_session()
         if not(project_id and secret):
             print(f"{self.RED}Session registration failed{self.RESET}")
@@ -137,12 +180,13 @@ class Wing:
 
         headers = {"Authorization": f"Bearer {secret}"}
 
-        if preset:
+        if wsForwarding:
             try:
-                asyncio.create_task(self.vmService(project_id, preset, port))
+                asyncio.create_task(self.vmService(project_id, wsForwarding))
                 print(f"Forwarding Dart VM services")
 
             except Exception as e:
+                pass
                 self.logger.exception("Forwarding failed")
                 self.log(
                     f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
@@ -158,56 +202,8 @@ class Wing:
                     m = await ws.recv()
                     message = json.loads(m)
 
-                    method = message["method"]
-                    location = message["path"]
-
-                    self.log(f"Received: [{method}] {self.YELLOW}http://127.0.0.1:{port}{location}{self.RESET}")
+                    await self.streamReqs(port, message, ws)
                     
-                    headers = dict(message["headers"])
-
-                    headers["x-forwarded-for"] = message.get("ip", "")
-                    headers["x-forwarded-host"] = message["headers"].get("host", "")
-                    headers["x-forwarded-proto"] = "http"
-                    headers["x-forwarded-by"] = "wing-tunnel"
-
-                    body = message["body"]
-
-                    if isinstance(body, dict) and body.get("type") == "Buffer":
-                        body = bytes(body["data"])
-
-                    response = requests.request(
-                        method,
-                        f"http://localhost:{port}{location}",
-                        params=message.get("query", None),
-                        headers=headers,
-                        cookies=message.get("cookies", None),
-                        data=body,
-                    )
-
-                    try:
-                        response.headers["Transfer-Encoding"] = "chunked"
-                        del response.headers["Content-Length"]
-                    except:
-                        pass
-
-                    response.headers["Project-Id"] = project_id
-                    headers_dict = dict(response.headers)
-                    set_cookies = response.raw.headers.getlist("Set-Cookie")
-                    
-                    if set_cookies:
-                        headers_dict["Set-Cookie"] = set_cookies
-
-                    chunks = list(response.iter_content(64*1024))
-
-                    if response.status_code == 304:
-                        await self.send_binary(ws, message["messageId"], response.status_code, headers_dict, b"", True)
-
-                    for i, chunk in enumerate(chunks):
-                        if chunk:
-                            await self.send_binary(ws, message["messageId"], response.status_code, response.headers, chunk, i==len(chunks)-1)
-                    
-                    self.log(f"Sent [{self.GREEN}{response.status_code}{self.RESET}] {response.headers.get('Content-Type', '')} @ {location}")
-
                 except Exception as e:
                     self.logger.exception("Forwarding failed")
                     self.log(
