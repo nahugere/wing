@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wing"
+dynamic = ["version"]
+description = "Wing is a CLI tool that can forward your ports using one line of code."
+requires-python = ">=3.9"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/wing/_version.py"

@@ -1,18 +1,20 @@
-import asyncio
-from datetime import datetime
-import json
-import logging
 import os
+import json
+import httpx
 import struct
-import requests
-import websockets
-import threading
 import urllib3
+import asyncio
+import logging
+import requests
+import threading
+import websockets
+from datetime import datetime
+from .config import DEFAULT_PORT, DEFAULT_SERVER_URL, DEFAULT_TIMEOUT
 
 class Wing:
 
-    URI = "http://localhost:4000"
-    WS_URI = "ws://localhost:4000"
+    URI = DEFAULT_SERVER_URL
+    WS_URI = f"ws://localhost:{DEFAULT_PORT}"
     VM_WS_URI = "ws://localhost:"
     VM_WS_PORT = 5432
 
@@ -25,13 +27,24 @@ class Wing:
 
     def __init__(self):
         self._setup_logger()
+        self.http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(DEFAULT_TIMEOUT),
+            follow_redirects=False
+        )
 
     def _reg_session(self):
-        response = requests.post(f"{self.URI}/api/create")
-        data = response.json()
+        try:
+            response = requests.post(f"{self.URI}/api/create")
+            data = response.json()
+        except Exception as e:
+            self.logger.exception("Session registration failed")
+            self.log(
+                f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
+            )
+            return None, None
 
         if data.get("statusCode") != 200:
-            return
+            return None, None
 
         return data.get("data")["project_id"], data.get("data")["secret"]
 
@@ -74,25 +87,30 @@ class Wing:
         await ws.send(header + meta + payload)
 
     async def vmListen(self, local_ws, tunnel_ws, client_id):
-        async for message in local_ws:
-            isBinary = isinstance(message, bytes)
-            await tunnel_ws.send(json.dumps({
-                'clientId': client_id,
-                'isBinary': isBinary,
-                'message': message.decode('base64') if isBinary else message
-            }))
+        try:
+            async for message in local_ws:
+                isBinary = isinstance(message, bytes)
+                await tunnel_ws.send(json.dumps({
+                    'clientId': client_id,
+                    'isBinary': isBinary,
+                    'message': message.decode('base64') if isBinary else message
+                }))
+        except Exception as e:
+            self.logger.exception("Dart VM listen failed")
+            self.log(
+                f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
+            )
 
     async def vmService(self, project_id, preset, port):
         local_connections = {}
 
-        async with websockets.connect(f"{self.VM_WS_URI}{self.VM_WS_PORT}/{project_id}", additional_headers={"X-Wing-Role": "agent"}) as ws:
-            while True:
-                m = await ws.recv()
-                message = json.loads(m)
-                if preset.name != "FLUTTER":
-                    port = message['port']
-            
-                try:
+        try:
+            async with websockets.connect(f"{self.VM_WS_URI}{self.VM_WS_PORT}/{project_id}", additional_headers={"X-Wing-Role": "agent"}) as ws:
+                while True:
+                    m = await ws.recv()
+                    message = json.loads(m)
+                    if preset.name != "FLUTTER":
+                        port = message['port']
 
                     if port not in local_connections:
                         local_ws = await websockets.connect(f"ws://localhost:{port}/{'/'.join(message['params'])}")
@@ -105,13 +123,13 @@ class Wing:
                     else:
                         await local_connections[port].send(raw)
 
-                except Exception as e:
-                    self.logger.exception("Forwarding failed")
-                    self.log(
-                        f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
-                    )
+        except Exception as e:
+            self.logger.exception("Dart VM forward failed")
+            self.log(
+                f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
+            )
 
-    async def start(self, project_id, port, preset=None, *args, **kwargs):
+    async def start(self, port, preset=None, *args, **kwargs):
         project_id, secret = self._reg_session()
         if not(project_id and secret):
             print(f"{self.RED}Session registration failed{self.RESET}")
@@ -132,11 +150,11 @@ class Wing:
 
         async with websockets.connect(f"{self.WS_URI}/{project_id}", additional_headers=headers) as ws:
             print("Connection to server established")
-            print(f"Forwarding port {self.YELLOW}{port}{self.RESET}")
+            print(f"Forwarding port {self.YELLOW}{port}{self.RESET}\n")
+            print(f"Project url: {self.URI}/tunnel/{project_id}/")
 
             while True:
                 try:
-                    # TODO: Implement error catching and logging
                     m = await ws.recv()
                     message = json.loads(m)
 
@@ -147,7 +165,7 @@ class Wing:
                     
                     headers = dict(message["headers"])
 
-                    headers["x-forwarded-for"] = message.get("ip", "196.191.61.106")
+                    headers["x-forwarded-for"] = message.get("ip", "")
                     headers["x-forwarded-host"] = message["headers"].get("host", "")
                     headers["x-forwarded-proto"] = "http"
                     headers["x-forwarded-by"] = "wing-tunnel"
@@ -197,22 +215,3 @@ class Wing:
                     )
 
             # await self.vmService(args[1])
-
-    def create(self, project_name):
-        response = requests.post(f"{self.URI}/api/create", json={"name": project_name})
-        data = response.json()
-        print(data)
-        if (data["statusCode"]==200):
-            project_id = data['data']['project_id']
-            self._save_to_sql(project_name, project_id)
-            print(f"Project created with project id {self.YELLOW}{project_id}{self.RESET}")
-        elif (data["statusCode"]==500):
-            print(f"{self.RED}Server error please try again later{self.RESET}")
-        return
-    
-    def help(self):
-        # TODO: Add random dad joke generator
-        print("WINGGGGGGGGGGGG\n\n")
-
-    def version(self):
-        print("Still a beta")
