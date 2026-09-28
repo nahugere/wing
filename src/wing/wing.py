@@ -16,7 +16,7 @@ class Wing:
     URI = DEFAULT_SERVER_URL
     WS_URI = f"ws://localhost:{DEFAULT_PORT}"
     VM_WS_URI = "ws://localhost:"
-    VM_WS_PORT = 5432
+    VM_WS_PORT = 21321
 
     RED = "\033[31m"
     GREEN = "\033[32m"
@@ -29,8 +29,18 @@ class Wing:
         self._setup_logger()
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(DEFAULT_TIMEOUT),
-            follow_redirects=False
+            follow_redirects=False,
+            event_hooks={
+                "request": [self._log_req],
+                "response": [self._log_res],
+            }
         )
+
+    async def _log_req(self, request):
+        self.log(f"Request: {request.method} {request.url}")
+
+    async def _log_res(self, response):
+        self.log(f"Response: {response.status_code} {response.url}")
 
     def _reg_session(self):
         try:
@@ -140,6 +150,8 @@ class Wing:
         headers["x-forwarded-proto"] = "http"
         headers["x-forwarded-by"] = "wing-tunnel"
 
+        headers.pop("content-length", None)
+
         body = message["body"]
         if isinstance(body, dict) and body.get("type") == "Buffer":
             body = bytes(body["data"])
@@ -151,31 +163,31 @@ class Wing:
             params=message.get("query", None),
             headers=headers,
             cookies=message.get("cookies", None),
-            data=body,
+            content=body,
         ) as response:
 
-                try:
-                    response.headers["Transfer-Encoding"] = "chunked"
-                    del response.headers["Content-Length"]
-                except:
-                    pass
+            response_headers = dict(response.headers.multi_items())
+            if "Content-Length" in response_headers:
+                del response_headers["Content-Length"]
+            if "content-length" in response_headers:
+                del response_headers["content-length"]
 
-                response_headers = list(response.headers.multi_items())
+            response_headers["Transfer-Encoding"] = "chunked"
 
+            await self.send_binary(
+                ws, mid, response.status_code, response_headers, b"", False)
+
+            async for chunk in response.aiter_bytes():
                 await self.send_binary(
-                    ws, mid, response.status_code, response_headers, b"", False)
+                    ws, mid, response.status_code, response_headers, chunk, False)
 
-                async for chunk in response.aiter_bytes():
-                    await self.send_binary(
-                        ws, mid, response.status_code, response_headers, chunk, False)
-
-                await self.send_binary(
-                    ws, mid, response.status_code, response_headers, b"", True)
+            await self.send_binary(
+                ws, mid, response.status_code, response_headers, b"", True)
 
     async def start(self, port, wsForwarding=True, *args, **kwargs):
         project_id, secret = self._reg_session()
         if not(project_id and secret):
-            print(f"{self.RED}Session registration failed{self.RESET}")
+            print(f"{self.RED}Session registration failed. Try again later.{self.RESET}")
             return
 
         headers = {"Authorization": f"Bearer {secret}"}
@@ -195,7 +207,7 @@ class Wing:
         async with websockets.connect(f"{self.WS_URI}/{project_id}", additional_headers=headers) as ws:
             print("Connection to server established")
             print(f"Forwarding port {self.YELLOW}{port}{self.RESET}\n")
-            print(f"Project url: {self.URI}/tunnel/{project_id}/")
+            print(f"Project url: {self.URI}/tunnel/{project_id}/")  
 
             while True:
                 try:
