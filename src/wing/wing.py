@@ -1,3 +1,4 @@
+import base64
 import os
 import json
 import httpx
@@ -96,22 +97,26 @@ class Wing:
         payload = chunk if chunk else b""
         await ws.send(header + meta + payload)
 
-    async def vmListen(self, local_ws, tunnel_ws, client_id):
+    async def ws_from_local(self, local_ws, tunnel_ws, client_id, connections):
         try:
             async for message in local_ws:
                 isBinary = isinstance(message, bytes)
+                if isBinary:
+                    message = message = base64.b64encode(message).decode("ascii")
                 await tunnel_ws.send(json.dumps({
                     'clientId': client_id,
                     'isBinary': isBinary,
-                    'message': message.decode('base64') if isBinary else message
+                    'message': message
                 }))
         except Exception as e:
-            self.logger.exception("Dart VM listen failed")
+            self.logger.exception("WS listen failed")
             self.log(
                 f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
             )
+        finally:
+            connections.pop(client_id, None)
 
-    async def vmService(self, project_id, preset):
+    async def vmService(self, project_id):
         local_connections = {}
 
         try:
@@ -119,26 +124,34 @@ class Wing:
                 while True:
                     m = await ws.recv()
                     message = json.loads(m)
-                    port = message['port']
+                    sendMessage = message["sendMessage"]
+                    clientId = message['clientId']
+                    #! Temporary solution
+                    port = "51087" if message['port'] == "8000" else message['port']
 
-                    if port not in local_connections:
-                        local_ws = await websockets.connect(f"ws://localhost:{port}/{'/'.join(message['params'])}")
-                        asyncio.create_task(self.vmListen(local_ws, ws, message['clientId']))
-                        local_connections[port] = local_ws
+                    if clientId not in local_connections:
+                        url = f"ws://localhost:{port}/{'/'.join(message['params'])}"
+                        local_ws = await websockets.connect(url)
+                        asyncio.create_task(self.ws_from_local(local_ws, ws, clientId, local_connections))
+                        local_connections[clientId] = local_ws
+
+                    if not sendMessage:
+                        continue
 
                     raw = message['message']
                     if message['isBinary']:
-                        await local_connections[port].send(bytes(raw, 'base64'))
+                        await local_connections[clientId].send(base64.b64encode(raw))
                     else:
-                        await local_connections[port].send(raw)
+                        await local_connections[clientId].send(raw)
 
         except Exception as e:
-            self.logger.exception("Dart VM forward failed")
+            self.logger.exception("WS forward failed")
             self.log(
                 f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
             )
+            raise KeyboardInterrupt
 
-    async def streamReqs(self, port, message, ws):
+    async def streamReqs(self, port, message, ws, projId):
         method = message["method"]
         location = message["path"]
         mid = message["messageId"]
@@ -173,6 +186,7 @@ class Wing:
                 del response_headers["content-length"]
 
             response_headers["Transfer-Encoding"] = "chunked"
+            response_headers["Project-Id"] = projId
 
             await self.send_binary(
                 ws, mid, response.status_code, response_headers, b"", False)
@@ -194,11 +208,10 @@ class Wing:
 
         if wsForwarding:
             try:
-                asyncio.create_task(self.vmService(project_id, wsForwarding))
+                asyncio.create_task(self.vmService(project_id))
                 print(f"Forwarding Dart VM services")
 
             except Exception as e:
-                pass
                 self.logger.exception("Forwarding failed")
                 self.log(
                     f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
@@ -214,12 +227,11 @@ class Wing:
                     m = await ws.recv()
                     message = json.loads(m)
 
-                    await self.streamReqs(port, message, ws)
+                    await self.streamReqs(port, message, ws, project_id)
                     
                 except Exception as e:
                     self.logger.exception("Forwarding failed")
                     self.log(
                         f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
                     )
-
-            # await self.vmService(args[1])
+                    break

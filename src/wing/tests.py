@@ -23,3 +23,6 @@ async def test_multiple_chunks():
     print(ws.sent)
 
     assert len(ws.sent) == 4
+
+# @pytest.mark.asyncio
+# async def test_ws_datatype():
