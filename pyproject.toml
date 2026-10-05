@@ -13,3 +13,6 @@ source = "vcs"
 
 [tool.hatch.build.hooks.vcs]
 version-file = "src/wing/_version.py"
+
+[project.scripts]
+wing = "wing.__main__:main"

@@ -190,4 +190,5 @@ dd.py
 da.py
 ds.py
 
-ASSESSMENT.md
+*.md
+!README.md

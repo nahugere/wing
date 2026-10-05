@@ -10,19 +10,15 @@ import requests
 import threading
 import websockets
 from datetime import datetime
-from .config import DEFAULT_PORT, DEFAULT_SERVER_URL, DEFAULT_TIMEOUT
+from .config import DEFAULT_SERVER_URL, DEFAULT_TIMEOUT, DEFAULT_WS_URL, VM_WS_URL
 
 class Wing:
-
-    URI = DEFAULT_SERVER_URL
-    WS_URI = f"ws://localhost:{DEFAULT_PORT}"
-    VM_WS_URI = "ws://localhost:"
-    VM_WS_PORT = 21321
 
     RED = "\033[31m"
     GREEN = "\033[32m"
     YELLOW = "\033[33m"
     RESET = "\033[0m"
+    SEM = asyncio.Semaphore(50)
     
     DB_NAME = "projects.db"
 
@@ -38,14 +34,14 @@ class Wing:
         )
 
     async def _log_req(self, request):
-        self.log(f"Request: {request.method} {request.url}")
+        self.log(f"Request: [{self.GREEN}{request.method}{self.RESET}] {request.url}")
 
     async def _log_res(self, response):
         self.log(f"Response: {response.status_code} {response.url}")
 
     def _reg_session(self):
         try:
-            response = requests.post(f"{self.URI}/api/create")
+            response = requests.post(f"{DEFAULT_SERVER_URL}/api/create")
             data = response.json()
         except Exception as e:
             self.logger.exception("Session registration failed")
@@ -99,10 +95,11 @@ class Wing:
 
     async def ws_from_local(self, local_ws, tunnel_ws, client_id, connections):
         try:
+            print("LOCAL CONNECTION ESTABLISHEDDDD! 💁💁💁💁💁")
             async for message in local_ws:
                 isBinary = isinstance(message, bytes)
                 if isBinary:
-                    message = message = base64.b64encode(message).decode("ascii")
+                    message = base64.b64encode(message).decode("ascii")
                 await tunnel_ws.send(json.dumps({
                     'clientId': client_id,
                     'isBinary': isBinary,
@@ -116,18 +113,20 @@ class Wing:
         finally:
             connections.pop(client_id, None)
 
-    async def vmService(self, project_id):
+    async def vmService(self, project_id, headers):
         local_connections = {}
+        headers["X-Wing-Role"] = "agent"
 
         try:
-            async with websockets.connect(f"{self.VM_WS_URI}{self.VM_WS_PORT}/{project_id}", additional_headers={"X-Wing-Role": "agent"}) as ws:
+            async with websockets.connect(f"{VM_WS_URL}/{project_id}", additional_headers=headers) as ws:
+                print(f"{self.YELLOW}Forwarding WebSocket connections{self.RESET}")
                 while True:
                     m = await ws.recv()
                     message = json.loads(m)
                     sendMessage = message["sendMessage"]
                     clientId = message['clientId']
-                    #! Temporary solution
-                    port = "51087" if message['port'] == "8000" else message['port']
+                    # ! Temp solution 
+                    port = "65026" if message['port'] == "8000" else message['port']
 
                     if clientId not in local_connections:
                         url = f"ws://localhost:{port}/{'/'.join(message['params'])}"
@@ -140,7 +139,7 @@ class Wing:
 
                     raw = message['message']
                     if message['isBinary']:
-                        await local_connections[clientId].send(base64.b64encode(raw))
+                        await local_connections[clientId].send(base64.b64decode(raw))
                     else:
                         await local_connections[clientId].send(raw)
 
@@ -198,6 +197,13 @@ class Wing:
             await self.send_binary(
                 ws, mid, response.status_code, response_headers, b"", True)
 
+    async def handle(self, port, message, ws, project_id):
+        try:
+            await self.streamReqs(port, message, ws, project_id) 
+        finally:
+            # self.SEM.release()
+            pass
+
     async def start(self, port, wsForwarding=True, *args, **kwargs):
         project_id, secret = self._reg_session()
         if not(project_id and secret):
@@ -208,8 +214,7 @@ class Wing:
 
         if wsForwarding:
             try:
-                asyncio.create_task(self.vmService(project_id))
-                print(f"Forwarding Dart VM services")
+                asyncio.create_task(self.vmService(project_id, headers))
 
             except Exception as e:
                 self.logger.exception("Forwarding failed")
@@ -217,21 +222,25 @@ class Wing:
                     f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
                 )
 
-        async with websockets.connect(f"{self.WS_URI}/{project_id}", additional_headers=headers) as ws:
+        async with websockets.connect(f"{DEFAULT_WS_URL}/{project_id}", additional_headers=headers) as ws:
             print("Connection to server established")
             print(f"Forwarding port {self.YELLOW}{port}{self.RESET}\n")
-            print(f"Project url: {self.URI}/tunnel/{project_id}/")  
+            print(f"Project url: {DEFAULT_SERVER_URL}/tunnel/{project_id}/")  
 
             while True:
-                try:
-                    m = await ws.recv()
-                    message = json.loads(m)
+                m = await ws.recv()
+                message = json.loads(m)
+                # await self.SEM.acquire()
+                asyncio.create_task(self.handle(port, message, ws, project_id))
+                # try:
+                #     m = await ws.recv()
+                #     message = json.loads(m)
 
-                    await self.streamReqs(port, message, ws, project_id)
+                #     await self.streamReqs(port, message, ws, project_id)
                     
-                except Exception as e:
-                    self.logger.exception("Forwarding failed")
-                    self.log(
-                        f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
-                    )
-                    break
+                # except Exception as e:
+                #     self.logger.exception("Forwarding failed")
+                #     self.log(
+                #         f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
+                #     )
+                #     break
