@@ -19,13 +19,14 @@ class Wing:
     YELLOW = "\033[33m"
     RESET = "\033[0m"
     SEM = asyncio.Semaphore(50)
+    LOCAL_CONNECTIONS = {}
     
     DB_NAME = "projects.db"
 
     def __init__(self):
         self._setup_logger()
         self.http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(DEFAULT_TIMEOUT),
+            # timeout=httpx.Timeout(DEFAULT_TIMEOUT),
             follow_redirects=False,
             event_hooks={
                 "request": [self._log_req],
@@ -93,63 +94,98 @@ class Wing:
         payload = chunk if chunk else b""
         await ws.send(header + meta + payload)
 
-    async def ws_from_local(self, local_ws, tunnel_ws, client_id, connections):
-        try:
-            print("LOCAL CONNECTION ESTABLISHEDDDD! 💁💁💁💁💁")
-            async for message in local_ws:
-                isBinary = isinstance(message, bytes)
-                if isBinary:
-                    message = base64.b64encode(message).decode("ascii")
-                await tunnel_ws.send(json.dumps({
-                    'clientId': client_id,
-                    'isBinary': isBinary,
-                    'message': message
-                }))
-        except Exception as e:
-            self.logger.exception("WS listen failed")
-            self.log(
-                f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
-            )
-        finally:
-            connections.pop(client_id, None)
-
     async def vmService(self, project_id, headers):
-        local_connections = {}
         headers["X-Wing-Role"] = "agent"
+        connecting = set()
 
         try:
-            async with websockets.connect(f"{VM_WS_URL}/{project_id}", additional_headers=headers) as ws:
-                print(f"{self.YELLOW}Forwarding WebSocket connections{self.RESET}")
+            async with websockets.connect(
+                f"{VM_WS_URL}/{project_id}",
+                additional_headers=headers
+            ) as tunnel_ws:
+
+                print(
+                    f"{self.YELLOW}Forwarding WebSocket connections{self.RESET}"
+                )
+
                 while True:
-                    m = await ws.recv()
+                    m = await tunnel_ws.recv()
                     message = json.loads(m)
                     sendMessage = message["sendMessage"]
-                    clientId = message['clientId']
-                    # ! Temp solution 
-                    port = "65026" if message['port'] == "8000" else message['port']
+                    clientId = message["clientId"]
+                    #! Temporary solution
+                    port = "52205" if message["port"] == "4000" else message["port"]
 
-                    if clientId not in local_connections:
-                        url = f"ws://localhost:{port}/{'/'.join(message['params'])}"
-                        local_ws = await websockets.connect(url)
-                        asyncio.create_task(self.ws_from_local(local_ws, ws, clientId, local_connections))
-                        local_connections[clientId] = local_ws
+                    if (clientId not in self.LOCAL_CONNECTIONS and clientId not in connecting):
+                        url = (f"ws://localhost:{port}/"f"{'/'.join(message['params'])}")
+                        connecting.add(clientId)
+                        asyncio.create_task( self.ws_from_local(
+                            url, tunnel_ws, clientId, connecting
+                        ))
 
                     if not sendMessage:
                         continue
 
-                    raw = message['message']
-                    if message['isBinary']:
-                        await local_connections[clientId].send(base64.b64decode(raw))
+                    if clientId not in self.LOCAL_CONNECTIONS:
+                        continue
+
+                    raw = json.loads(message["message"])
+
+                    if message["isBinary"]:
+                        await self.LOCAL_CONNECTIONS[clientId].send(
+                            base64.b64decode(raw)
+                        )
                     else:
-                        await local_connections[clientId].send(raw)
+                        await self.LOCAL_CONNECTIONS[clientId].send(json.dumps(["ConnectRequest",{"appId":"574CbOfDYwKJlusDKd3WFw==","instanceId":"a45c1b16-6b01-426f-b85c-eff1dc90137e","entrypointPath":"main_module.bootstrap.js"}]))
 
         except Exception as e:
             self.logger.exception("WS forward failed")
             self.log(
-                f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
+                f"{self.RED}Error: {e}{self.RESET}. "
+                f"Check {self.YELLOW}{self.log_file}{self.RESET} for details"
             )
             raise KeyboardInterrupt
 
+    async def ws_from_local(self, url, tunnel_ws, client_id, connecting):
+        try:
+            self.log(f"Connecting local WebSocket: client={client_id}, url={url}")
+
+            async with websockets.connect(url) as ws:
+
+                self.LOCAL_CONNECTIONS[client_id] = ws
+                connecting.discard(client_id)
+
+                async for message in ws:
+                    isBinary = isinstance(message, bytes)
+
+                    if isBinary:
+                        message = base64.b64encode(message).decode("ascii")
+
+                    await tunnel_ws.send(
+                        json.dumps({
+                            "clientId": client_id,
+                            "isBinary": isBinary,
+                            "message": message
+                        })
+                    )
+
+        except websockets.exceptions.ConnectionClosed:
+            pass
+
+        except Exception as e:
+            self.logger.exception(
+                f"Local WebSocket failed for client {client_id}"
+            )
+
+        finally:
+            connecting.discard(client_id)
+
+            if (
+                ws is not None
+                and self.LOCAL_CONNECTIONS.get(client_id) is ws
+            ):
+                self.LOCAL_CONNECTIONS.pop(client_id, None)
+    
     async def streamReqs(self, port, message, ws, projId):
         method = message["method"]
         location = message["path"]
@@ -230,17 +266,4 @@ class Wing:
             while True:
                 m = await ws.recv()
                 message = json.loads(m)
-                # await self.SEM.acquire()
                 asyncio.create_task(self.handle(port, message, ws, project_id))
-                # try:
-                #     m = await ws.recv()
-                #     message = json.loads(m)
-
-                #     await self.streamReqs(port, message, ws, project_id)
-                    
-                # except Exception as e:
-                #     self.logger.exception("Forwarding failed")
-                #     self.log(
-                #         f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
-                #     )
-                #     break
