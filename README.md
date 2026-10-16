@@ -2,6 +2,9 @@
   <img src="imgs/logo.png" alt="Wing Logo">
 </p>
 
+#
+Visit: [wingserver.vercel.app](https://wingserver.vercel.app)
+#
 
 ## 1. Introduction
 
