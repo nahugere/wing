@@ -24,6 +24,7 @@ def build_parser():
     parser.add_argument(
         "-v", "--version",
         action="version",
+        version=f"%(prog)s {__version__}",
         help="Get which version of wing you're running"
     )
     parser.add_argument(
