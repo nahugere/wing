@@ -65,7 +65,7 @@ class Wing:
         self.logger = logging.getLogger(f"wing_{timestamp}")
         self.logger.setLevel(logging.ERROR)
 
-        handler = logging.FileHandler(self.log_file)
+        handler = logging.FileHandler(self.log_file, delay=True)
         handler.setFormatter(logging.Formatter(
             "%(asctime)s\n%(levelname)s\n%(message)s\n"
         ))
@@ -94,7 +94,7 @@ class Wing:
         payload = chunk if chunk else b""
         await ws.send(header + meta + payload)
 
-    async def vmService(self, project_id, headers):
+    async def vmService(self, project_id, headers, p=None):
         headers["X-Wing-Role"] = "agent"
         connecting = set()
 
@@ -113,8 +113,7 @@ class Wing:
                     message = json.loads(m)
                     sendMessage = message["sendMessage"]
                     clientId = message["clientId"]
-                    #! Temporary solution
-                    port = "52205" if message["port"] == "4000" else message["port"]
+                    port = p if message["port"]=="0000" else message["port"]
 
                     if (clientId not in self.LOCAL_CONNECTIONS and clientId not in connecting):
                         url = (f"ws://localhost:{port}/"f"{'/'.join(message['params'])}")
@@ -129,24 +128,25 @@ class Wing:
                     if clientId not in self.LOCAL_CONNECTIONS:
                         continue
 
-                    raw = json.loads(message["message"])
+                    raw = message["message"]
 
                     if message["isBinary"]:
                         await self.LOCAL_CONNECTIONS[clientId].send(
                             base64.b64decode(raw)
                         )
                     else:
-                        await self.LOCAL_CONNECTIONS[clientId].send(json.dumps(["ConnectRequest",{"appId":"574CbOfDYwKJlusDKd3WFw==","instanceId":"a45c1b16-6b01-426f-b85c-eff1dc90137e","entrypointPath":"main_module.bootstrap.js"}]))
+                        await self.LOCAL_CONNECTIONS[clientId].send(raw)
 
         except Exception as e:
             self.logger.exception("WS forward failed")
             self.log(
-                f"{self.RED}Error: {e}{self.RESET}. "
+                f"{self.RED}An error occurred while forwarding{self.RESET}. "
                 f"Check {self.YELLOW}{self.log_file}{self.RESET} for details"
             )
-            raise KeyboardInterrupt
+            return
 
     async def ws_from_local(self, url, tunnel_ws, client_id, connecting):
+        ws = None
         try:
             self.log(f"Connecting local WebSocket: client={client_id}, url={url}")
 
@@ -235,9 +235,10 @@ class Wing:
 
     async def handle(self, port, message, ws, project_id):
         try:
-            await self.streamReqs(port, message, ws, project_id) 
-        finally:
-            # self.SEM.release()
+            await self.streamReqs(port, message, ws, project_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
             pass
 
     async def start(self, port, wsForwarding=True, *args, **kwargs):
@@ -250,12 +251,13 @@ class Wing:
 
         if wsForwarding:
             try:
-                asyncio.create_task(self.vmService(project_id, headers))
+                asyncio.create_task(self.vmService(project_id, headers, port))
 
-            except Exception as e:
+            except Exception:
                 self.logger.exception("Forwarding failed")
                 self.log(
-                    f"{self.RED}Error: {e}{self.RESET}. Check {self.YELLOW}{self.log_file}{self.RESET} for details"
+                    f"{self.RED}An error occurred while starting forwarding{self.RESET}. "
+                    f"Check {self.YELLOW}{self.log_file}{self.RESET} for details"
                 )
 
         async with websockets.connect(f"{DEFAULT_WS_URL}/{project_id}", additional_headers=headers) as ws:

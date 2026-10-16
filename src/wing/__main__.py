@@ -2,14 +2,15 @@ import sys
 import signal
 import asyncio
 import argparse
+import httpx
+import websockets
 from .wing import Wing
-from pynput import keyboard
+# from pynput import keyboard
 from ._version import __version__
 from .integrations.flutter_preset import FlutterPreset
 
 WING = Wing()
-
-import argparse
+flutter_preset = None
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -48,8 +49,14 @@ def handle_start(target, flutter=False):
             flutter_preset = FlutterPreset(target)
             flutter_preset.run_build()
             target = flutter_preset.start_server()
-        except Exception as e:
-            print(e)
+        except ValueError as e:
+            print(f"\n\033[31mError: {e}\033[0m")
+            return
+        except Exception:
+            print(
+                "\n\033[31mAn error occurred while setting up your Flutter project.\033[0m"
+                f" Check \033[33m{WING.log_file}\033[0m for details"
+            )
             return
 
     loop = asyncio.new_event_loop()
@@ -64,41 +71,50 @@ def handle_start(target, flutter=False):
 
     loop.add_signal_handler(signal.SIGINT, handle_sigint)
 
+    def _loop_exception_handler(loop, context):
+        exc = context.get("exception")
+        if exc and not isinstance(exc, asyncio.CancelledError):
+            if isinstance(exc, (OSError, httpx.HTTPError, websockets.WebSocketException)):
+                return
+            WING.logger.exception("Unhandled exception in event loop")
+
+    loop.set_exception_handler(_loop_exception_handler)
+
 
     try:
         main_task = loop.create_task(WING.start(target))
         loop.run_forever()
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        WING.logger.exception("Unexpected error")
+        print(f"\n{WING.RED}An unexpected error occurred{WING.RESET}. "
+              f"Check {WING.YELLOW}{WING.log_file}{WING.RESET} for details")
     finally:
-        pending = asyncio.all_tasks(loop)
-        for task in pending:
-            task.cancel()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
 
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-
-        loop.run_until_complete(WING.http_client.aclose())
-        loop.close()
-        print("\nByeeee")
-
-def on_press(key):
-  try:
-    print(f"Key {key.char} pressed")
-  except AttributeError:
-    print(f"Special key {key} pressed")
-
-def on_release(key):
-  if key == keyboard.Key.esc:
-    return False
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.wait(pending, timeout=3.0)
+                )
+            loop.run_until_complete(WING.http_client.aclose())
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except KeyboardInterrupt:
+            pass
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 def main():
     parser = build_parser()
     args = parser.parse_args()
 
     if "start" in args.action:
-        with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-            listener.join()
         handle_start(args.target, args.flutter)
 
 if __name__ == "__main__":

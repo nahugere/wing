@@ -35,8 +35,10 @@ class FlutterPreset:
             )
             print("Flutter Build completed.")
             return True
-        except subprocess.CalledProcessError:
-            raise subprocess.CalledProcessError("There has been an error running flutter build")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"Flutter build failed with exit code {e.returncode}"
+            ) from e
         finally:
             self.BUILDING = False
 
@@ -58,5 +60,9 @@ class FlutterPreset:
             daemon=True,
         )
         self.SERVER_THREAD.start()
-        print("Server running on port 8374.")
+        print("Wing is now running flutter.")
         return 8374
+
+    # def __run_restart(self):
+    #     self.run_build()
+    #     self.start_server(kill_server=True)
