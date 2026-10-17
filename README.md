@@ -26,7 +26,7 @@ The client is written in Python and requires Python 3.9 or later.
 
 ### 2.2 Installing
 
-Wing supports macOS and Linux. Install it using the public installation
+Wing supports **Windows, macOS, and Linux.** Install it using the public installation
 script:
 
 ``` bash
@@ -44,6 +44,25 @@ Wing and its dependencies, and configures the `wing` command.
 
 If the command is not recognized after installation, restart your
 terminal or ensure that `~/.local/bin` is included in your `PATH`.
+
+For **Windows**, clone the repository to your machine. To run wing, you'll need to install the required packages which are specified under `requirements.txt` To install the packages run:
+```bash
+pip install -r requirements.txt
+```
+
+After installing the required packages, to start using wing, run:
+```bash
+pip install -e .
+```
+
+You can verify installation by running:
+```bash
+wing --version
+```
+or
+```bash
+python -m wing --version
+```
 
 ### 2.3 Updating
 
