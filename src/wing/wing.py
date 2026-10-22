@@ -21,7 +21,6 @@ class Wing:
     SEM = asyncio.Semaphore(50)
     LOCAL_CONNECTIONS = {}
     
-    DB_NAME = "projects.db"
 
     def __init__(self):
         self._setup_logger()
